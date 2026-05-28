@@ -1,0 +1,38 @@
+{
+  "name": "funding-rate-farmer",
+  "version": "0.1.0",
+  "description": "Multi-venue funding rate farming bot supporting Drift, Zeta, Mango, and Hyperliquid",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "funding-rate-farmer": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "dev": "tsx src/cli.ts",
+    "scan": "tsx src/cli.ts scan",
+    "farm": "tsx src/cli.ts farm",
+    "status": "tsx src/cli.ts status",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@drift-labs/sdk": "^2.156.0",
+    "@solana/web3.js": "^1.98.0",
+    "@zetamarkets/sdk": "^1.64.0",
+    "@blockworks-foundation/mango-client": "^3.6.20",
+    "axios": "^1.16.0",
+    "zod": "^4.4.0",
+    "chalk": "^5.6.0",
+    "dotenv": "^17.4.0",
+    "commander": "^14.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "tsx": "^4.16.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
