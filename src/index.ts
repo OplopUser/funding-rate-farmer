@@ -1,18 +1,37 @@
 /**
- * Funding Rate Farmer — public API.
+ * Funding Rate Farmer: public library API.
  *
- * A multi-venue funding rate farming bot supporting Drift Protocol,
- * Zeta Markets, Mango Markets, and Hyperliquid.
+ * Scans perpetual funding rates on Hyperliquid and Drift, ranks the side
+ * that receives funding, and tracks paper positions. Read-only: nothing in
+ * this package signs or sends transactions.
  */
 
-export { type FundingRate, type PerpMarket, type Position, type FarmingOpportunity, Venue, PositionSide } from './types.js';
-export { config, type Config } from './config.js';
-export { annualizeFundingRate, earningSide, formatApr, formatRate } from './apr.js';
-export { scanOpportunities, displayOpportunities } from './scanner.js';
-export { openPosition, closePosition, getPositions, getPosition, displayPositions } from './positions.js';
 export {
-  fetchDriftFundingRates,
-  fetchZetaFundingRates,
-  fetchMangoFundingRates,
-  fetchHyperliquidFundingRates,
-} from './fetchers/index.js';
+  Venue,
+  type PositionSide,
+  type FundingRate,
+  type VenueFetchResult,
+  type FarmingOpportunity,
+  type Position,
+  type PnlBreakdown,
+} from './types.js';
+export { loadConfig, parseConfig, type Config, type ConfigResult } from './config.js';
+export { annualizeFundingRate, earningSide, formatApr, formatRate, HOURS_PER_YEAR } from './apr.js';
+export { rankOpportunities, rateToOpportunity, type RankOptions } from './ranking.js';
+export {
+  fetchAllRates,
+  fetchMarkPrice,
+  type ScanOptions,
+  type ScanResult,
+  type VenueReport,
+} from './scanner.js';
+export {
+  loadPositions,
+  savePositions,
+  openPaperPosition,
+  closePaperPosition,
+  resolvePositionId,
+  computePnl,
+  type ResolveResult,
+} from './positions.js';
+export * from './fetchers/index.js';

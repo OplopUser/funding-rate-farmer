@@ -1,46 +1,45 @@
 /**
- * Effective APR calculation from funding rates.
+ * Funding-rate normalisation.
  *
  * Funding rates on perp DEXes are periodic payments between long and short
- * positions. The funding interval varies by venue.
+ * positions, quoted per funding interval. To compare venues we annualise:
  *
- * Standard formula:
- *   APR = hourly_rate × 24 × 365  (for 1h funding intervals)
- *   APR = 8h_rate × 3 × 365       (for 8h funding intervals)
+ *   APR = rate_per_interval × (24 / interval_hours) × 365
  *
- * A positive rate means longs pay shorts (short positions earn funding).
- * A negative rate means shorts pay longs (long positions earn funding).
+ * Sign convention used throughout this project (it matches both Drift and
+ * Hyperliquid):
+ *   positive rate → longs pay shorts → the short side earns
+ *   negative rate → shorts pay longs → the long side earns
  */
 
-import { type PositionSide } from './types.js';
+import type { PositionSide } from './types.js';
+
+export const HOURS_PER_YEAR = 24 * 365;
 
 /**
- * Compute the annualized APR from a raw funding rate.
+ * Annualise a per-interval funding rate (simple, not compounded).
  *
- * @param rate       - Raw funding rate as decimal (e.g. 0.0001 for 0.01%)
- * @param intervalH  - Funding interval in hours (1, 8, etc.)
- * @returns          - Annualized APR as a decimal (e.g. 0.20 = 20% APR)
+ * @param rate      - Funding rate per interval as a decimal (0.0001 = 0.01%)
+ * @param intervalH - Funding interval in hours (must be > 0)
+ * @returns           Annualised rate as a decimal (0.20 = 20% APR), sign preserved
  */
 export function annualizeFundingRate(rate: number, intervalH: number): number {
-  const intervalsPerDay = 24 / intervalH;
-  return rate * intervalsPerDay * 365;
+  if (!(intervalH > 0)) {
+    throw new RangeError(`Funding interval must be positive, got ${intervalH}`);
+  }
+  return rate * (HOURS_PER_YEAR / intervalH);
 }
 
 /**
- * Determine which side earns the funding payment.
- *
- * Positive funding rate → longs pay shorts → short side earns.
- * Negative funding rate → shorts pay longs → long side earns.
- *
- * @param rate - Raw funding rate
- * @returns The position side that would earn funding
+ * The side that receives funding at this rate. A zero rate pays nobody;
+ * by convention it maps to 'long' (and annualises to 0% APR).
  */
 export function earningSide(rate: number): PositionSide {
   return rate > 0 ? 'short' : 'long';
 }
 
 /**
- * Format an APR value as a human-readable percentage string.
+ * Format an APR decimal as a signed percentage string, e.g. "+12.34%".
  */
 export function formatApr(aprDecimal: number): string {
   const pct = aprDecimal * 100;
@@ -49,7 +48,7 @@ export function formatApr(aprDecimal: number): string {
 }
 
 /**
- * Format a raw funding rate as a percentage string.
+ * Format a raw funding rate as a percentage string, e.g. "0.0100%".
  */
 export function formatRate(rate: number): string {
   return `${(rate * 100).toFixed(4)}%`;

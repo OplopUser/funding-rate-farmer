@@ -2,7 +2,14 @@
  * Fetchers barrel export.
  */
 
-export { fetchDriftFundingRates, driftEarningSide, driftAnnualizedApr } from './drift.js';
-export { fetchZetaFundingRates, zetaEarningSide, zetaAnnualizedApr } from './zeta.js';
-export { fetchMangoFundingRates, mangoEarningSide, mangoAnnualizedApr } from './mango.js';
-export { fetchHyperliquidFundingRates, hyperliquidAnnualizedApr } from './hyperliquid.js';
+export {
+  fetchDriftFundingRates,
+  normalizeDriftMarket,
+  type DriftPerpMarketFields,
+  type DriftFetchOptions,
+} from './drift.js';
+export {
+  fetchHyperliquidFundingRates,
+  parseHyperliquidMetaAndAssetCtxs,
+  type HyperliquidMetaAndAssetCtxs,
+} from './hyperliquid.js';

@@ -1,133 +1,190 @@
 #!/usr/bin/env node
 
 /**
- * Funding Rate Farmer — CLI runner.
+ * Funding Rate Farmer CLI (paper trading only).
  *
- * Commands:
- *   scan   - Scan all venues and show top funding rate opportunities
- *   farm   - Enter the best available position
- *   status - Show current positions
- *   close  - Close a specific position
+ *   scan                 rank current funding opportunities across venues
+ *   farm                 open a paper position in the best (or a chosen) opportunity
+ *   status               list paper positions with live mark prices and PnL
+ *   close <id-prefix>    close a paper position at the live mark price
  */
 
-import { Command } from 'commander';
+import { Command, InvalidArgumentError, Option } from 'commander';
 import chalk from 'chalk';
-import { scanOpportunities, displayOpportunities } from './scanner.js';
-import { openPosition, closePosition, displayPositions, getPositions } from './positions.js';
-import { config } from './config.js';
-import { type FarmingOpportunity } from './types.js';
+import { loadConfig } from './config.js';
+import { fetchAllRates, fetchMarkPrice, type ScanResult } from './scanner.js';
+import { rankOpportunities } from './ranking.js';
+import {
+  closePaperPosition,
+  computePnl,
+  loadPositions,
+  openPaperPosition,
+  resolvePositionId,
+} from './positions.js';
+import {
+  printOpportunities,
+  printPnl,
+  printPosition,
+  printPositionsTable,
+  printVenueReports,
+} from './display.js';
+import { Venue, type FarmingOpportunity } from './types.js';
+
+const VERSION = '0.2.0';
+
+function nonNegativeNumber(value: string): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) throw new InvalidArgumentError('must be a non-negative number');
+  return n;
+}
+
+function positiveInt(value: string): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n <= 0) throw new InvalidArgumentError('must be a positive integer');
+  return n;
+}
+
+const venueOption = () =>
+  new Option('--venue <venue>', 'only scan one venue')
+    .choices(Object.values(Venue).map((v) => v.toLowerCase()))
+    .argParser((v) => v.toUpperCase() as Venue);
+
+function banner(): void {
+  console.log(chalk.bold.cyan('\nFunding Rate Farmer') + chalk.dim(`  v${VERSION}  (paper trading only)\n`));
+}
+
+async function scan(venue?: Venue): Promise<ScanResult> {
+  const cfg = loadConfig();
+  console.log('Fetching funding rates...');
+  const result = await fetchAllRates({
+    solanaRpcUrl: cfg.SOLANA_RPC_URL,
+    hyperliquidApiUrl: cfg.HYPERLIQUID_API_URL,
+    venues: venue ? [venue] : undefined,
+  });
+  printVenueReports(result.reports);
+  return result;
+}
 
 const program = new Command();
 
 program
   .name('funding-rate-farmer')
-  .description('Multi-venue funding rate farming bot (Drift, Zeta, Mango, Hyperliquid)')
-  .version('0.1.0');
+  .description('Scan perp funding rates on Hyperliquid and Drift and paper-trade the earning side')
+  .version(VERSION);
 
 program
   .command('scan')
-  .description('Scan all venues and show top funding rate opportunities')
-  .option('-m, --min-apr <percent>', 'Minimum APR percentage filter', String(config.MIN_APR_PERCENT))
-  .action(async (options: { minApr: string }) => {
-    console.log(chalk.bold.cyan('\n═══ FUNDING RATE FARMER ═══\n'));
-    console.log(`Simulation mode: ${config.SIMULATION_ONLY ? chalk.green('ON') : chalk.red('OFF')}\n`);
-
-    const minApr = parseFloat(options.minApr) || config.MIN_APR_PERCENT;
-    const opportunities = await scanOpportunities(minApr);
-    displayOpportunities(opportunities);
-
-    if (opportunities.length > 0) {
-      console.log(chalk.dim('Tip: Use "funding-rate-farmer farm" to enter the best position.'));
-    }
+  .description('Rank current funding-rate opportunities')
+  .option('-m, --min-apr <percent>', 'minimum APR in percent (default: MIN_APR_PERCENT)', nonNegativeNumber)
+  .option('--min-oi <usd>', 'minimum open interest in USD (default: MIN_OPEN_INTEREST_USD)', nonNegativeNumber)
+  .option('-n, --limit <rows>', 'rows to show', positiveInt, 20)
+  .addOption(venueOption())
+  .action(async (o: { minApr?: number; minOi?: number; limit: number; venue?: Venue }) => {
+    const cfg = loadConfig();
+    banner();
+    const minAprPercent = o.minApr ?? cfg.MIN_APR_PERCENT;
+    const minOpenInterestUsd = o.minOi ?? cfg.MIN_OPEN_INTEREST_USD;
+    const { rates } = await scan(o.venue);
+    const opps = rankOpportunities(rates, { minAprPercent, minOpenInterestUsd });
+    console.log(
+      `${opps.length} opportunities with APR >= ${minAprPercent}% and open interest >= $${minOpenInterestUsd.toLocaleString('en-US')}\n`,
+    );
+    printOpportunities(opps, o.limit);
   });
 
 program
   .command('farm')
-  .description('Enter the best available funding rate farming position')
-  .option('-s, --size <usd>', 'Position size in USD', '1000')
-  .option('-m, --min-apr <percent>', 'Minimum APR percentage', String(config.MIN_APR_PERCENT))
-  .action(async (options: { size: string; minApr: string }) => {
-    console.log(chalk.bold.cyan('\n═══ FUNDING RATE FARMER ═══\n'));
-    console.log(`Simulation mode: ${config.SIMULATION_ONLY ? chalk.green('ON') : chalk.red('OFF')}\n`);
+  .description('Open a paper position in the top-ranked opportunity (or --market)')
+  .option('-s, --size <usd>', 'position notional in USD', nonNegativeNumber, 1000)
+  .option('-m, --min-apr <percent>', 'minimum APR in percent (default: MIN_APR_PERCENT)', nonNegativeNumber)
+  .option('--min-oi <usd>', 'minimum open interest in USD (default: MIN_OPEN_INTEREST_USD)', nonNegativeNumber)
+  .option('--market <symbol>', 'pick this market (e.g. SOL-PERP) instead of the top-ranked one')
+  .addOption(venueOption())
+  .action(
+    async (o: { size: number; minApr?: number; minOi?: number; market?: string; venue?: Venue }) => {
+      const cfg = loadConfig();
+      banner();
+      const { rates } = await scan(o.venue);
+      const opps = rankOpportunities(rates, {
+        minAprPercent: o.minApr ?? cfg.MIN_APR_PERCENT,
+        minOpenInterestUsd: o.minOi ?? cfg.MIN_OPEN_INTEREST_USD,
+      });
 
-    const minApr = parseFloat(options.minApr) || config.MIN_APR_PERCENT;
-    const sizeUsd = parseFloat(options.size) || 1000;
+      let pick: FarmingOpportunity | undefined;
+      if (o.market) {
+        const want = o.market.toUpperCase();
+        pick = opps.find((x) => x.marketSymbol.toUpperCase() === want);
+        if (!pick) {
+          console.error(chalk.red(`${o.market} is not among the opportunities passing the filters.`));
+          process.exitCode = 1;
+          return;
+        }
+      } else {
+        pick = opps[0];
+        if (!pick) {
+          console.error(chalk.yellow('No opportunity passes the filters; nothing opened.'));
+          process.exitCode = 1;
+          return;
+        }
+      }
 
-    const opportunities = await scanOpportunities(minApr);
-
-    if (opportunities.length === 0) {
-      console.log(chalk.yellow('❌ No opportunities found above the minimum APR threshold.'));
-      return;
-    }
-
-    const best = opportunities[0];
-    const entryPrice = await estimateEntryPrice(best);
-
-    if (entryPrice === null) {
-      console.log(chalk.red('❌ Could not determine entry price. Aborting.'));
-      return;
-    }
-
-    await openPosition(best, sizeUsd, entryPrice);
-    console.log(chalk.green('\n✅ Position opened successfully!'));
-  });
+      const position = openPaperPosition(cfg.POSITIONS_FILE, pick, o.size);
+      console.log(chalk.green('Opened paper position:'));
+      printPosition(position);
+      console.log(chalk.dim(`\nSaved to ${cfg.POSITIONS_FILE}. Close it with: close ${position.id}\n`));
+    },
+  );
 
 program
   .command('status')
-  .description('Show current open positions')
-  .action(() => {
-    console.log(chalk.bold.cyan('\n═══ FUNDING RATE FARMER ═══\n'));
-    displayPositions();
+  .description('List open paper positions with live mark prices and PnL')
+  .action(async () => {
+    const cfg = loadConfig();
+    banner();
+    const positions = loadPositions(cfg.POSITIONS_FILE);
+    const now = new Date();
+    const rows = await Promise.all(
+      positions.map(async (position) => {
+        try {
+          const price = await fetchMarkPrice(position.venue, position.marketSymbol, {
+            solanaRpcUrl: cfg.SOLANA_RPC_URL,
+            hyperliquidApiUrl: cfg.HYPERLIQUID_API_URL,
+          });
+          return { position, pnl: computePnl(position, price, now) };
+        } catch (err) {
+          return { position, error: (err as Error).message };
+        }
+      }),
+    );
+    printPositionsTable(rows);
   });
 
 program
   .command('close')
-  .description('Close a specific position')
-  .argument('<position-id>', 'Position ID to close')
-  .action(async (positionId: string) => {
-    console.log(chalk.bold.cyan('\n═══ FUNDING RATE FARMER ═══\n'));
-
-    const pos = getPositions().find((p) => p.id.startsWith(positionId));
-    if (!pos) {
-      console.log(chalk.red(`❌ Position not found: ${positionId}`));
+  .description('Close a paper position at the live mark price')
+  .argument('<id-prefix>', 'position ID or any unique prefix of it')
+  .action(async (idPrefix: string) => {
+    const cfg = loadConfig();
+    banner();
+    const resolved = resolvePositionId(loadPositions(cfg.POSITIONS_FILE), idPrefix);
+    if (!resolved.ok) {
+      console.error(chalk.red(resolved.error));
+      process.exitCode = 1;
       return;
     }
-
-    await closePosition(pos.id);
-    console.log(chalk.green('\n✅ Position closed successfully!'));
+    const { venue, marketSymbol, id } = resolved.position;
+    const price = await fetchMarkPrice(venue, marketSymbol, {
+      solanaRpcUrl: cfg.SOLANA_RPC_URL,
+      hyperliquidApiUrl: cfg.HYPERLIQUID_API_URL,
+    });
+    const { position, pnl } = closePaperPosition(cfg.POSITIONS_FILE, id, price);
+    console.log(chalk.green('Closed paper position:'));
+    printPosition(position);
+    printPnl(pnl);
+    console.log('');
   });
 
-/**
- * Estimate the current entry price for a market.
- *
- * For simulation mode, returns a reasonable estimate based on the
- * venue. In production this would come from the actual order book.
- *
- * @returns Price in USD, or null if unavailable
- */
-async function estimateEntryPrice(_opportunity: FarmingOpportunity): Promise<number | null> {
-  // In simulation mode, return a placeholder price.
-  // Real implementation would fetch the current mark price from the venue.
-  const priceMap: Record<string, number> = {
-    'SOL-PERP': 142.50,
-    'BTC-PERP': 67500,
-    'ETH-PERP': 3450,
-    'APT-PERP': 8.20,
-    'ARB-PERP': 1.10,
-    'DOGE-PERP': 0.15,
-    'BNB-PERP': 595,
-    'OP-PERP': 2.45,
-    'SUI-PERP': 1.80,
-    'TIA-PERP': 8.50,
-    'WIF-PERP': 2.90,
-  };
-
-  return priceMap[_opportunity.marketSymbol] ?? 100;
-}
-
-program.parse(process.argv);
-
-// Show help if no command provided
-if (!process.argv.slice(2).length) {
-  program.outputHelp();
-}
+program.parseAsync(process.argv).catch((err: unknown) => {
+  console.error(chalk.red(`Error: ${(err as Error).message ?? err}`));
+  process.exitCode = 1;
+});

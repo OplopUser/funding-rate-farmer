@@ -1,203 +1,150 @@
 /**
- * Position manager.
+ * Paper position store and PnL maths.
  *
- * Tracks open positions across all venues. In SIMULATION_ONLY mode
- * (default), positions are paper-only with no real capital risk.
- *
- * Supports:
- *   - Opening simulated positions
- *   - Closing positions
- *   - Listing current positions
- *   - Calculating unrealized PnL
+ * Positions are local JSON records only; nothing here signs or sends a
+ * transaction. The store is a single JSON array of open positions.
  */
 
-import { type Position, type PositionSide, type FarmingOpportunity, Venue } from './types.js';
-import { config } from './config.js';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { HOURS_PER_YEAR } from './apr.js';
+import type { FarmingOpportunity, PnlBreakdown, Position } from './types.js';
 
-const POSITIONS_FILE = path.resolve('data', 'positions.json');
+// ---------------------------------------------------------------------------
+// Storage
+// ---------------------------------------------------------------------------
 
-interface StoredPosition {
-  id: string;
-  venue: Venue;
-  marketSymbol: string;
-  side: PositionSide;
-  sizeUsd: number;
-  entryPrice: number;
-  enteredApr: number;
-  enteredAt: string;
+export function loadPositions(file: string): Position[] {
+  if (!fs.existsSync(file)) return [];
+  const data = JSON.parse(fs.readFileSync(file, 'utf-8')) as unknown;
+  if (!Array.isArray(data)) throw new Error(`${file} does not contain a JSON array`);
+  return data as Position[];
 }
 
-/**
- * Load positions from disk.
- */
-function loadPositions(): StoredPosition[] {
-  try {
-    if (fs.existsSync(POSITIONS_FILE)) {
-      const data = fs.readFileSync(POSITIONS_FILE, 'utf-8');
-      return JSON.parse(data) as StoredPosition[];
-    }
-  } catch (err) {
-    console.warn('[Positions] Failed to load positions file:', (err as Error).message);
-  }
-  return [];
+export function savePositions(file: string, positions: Position[]): void {
+  fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(positions, null, 2) + '\n');
+  fs.renameSync(tmp, file);
 }
 
-/**
- * Save positions to disk.
- */
-function savePositions(positions: StoredPosition[]): void {
-  try {
-    const dir = path.dirname(POSITIONS_FILE);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    fs.writeFileSync(POSITIONS_FILE, JSON.stringify(positions, null, 2));
-  } catch (err) {
-    console.error('[Positions] Failed to save positions:', (err as Error).message);
+function newId(existing: Position[]): string {
+  for (;;) {
+    const id = randomBytes(4).toString('hex');
+    if (!existing.some((p) => p.id === id)) return id;
   }
 }
 
-/**
- * Generate a unique position ID.
- */
-function generateId(): string {
-  return `pos_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-}
+// ---------------------------------------------------------------------------
+// ID prefix resolution
+// ---------------------------------------------------------------------------
+
+export type ResolveResult =
+  | { ok: true; position: Position }
+  | { ok: false; error: string };
 
 /**
- * Open a new position (paper/simulated).
- *
- * In SIMULATION_ONLY mode, this just records the position locally.
- * In live mode (SIMULATION_ONLY=false), this would execute real
- * transactions on the venue.
- *
- * @param opportunity - The farming opportunity to enter
- * @param sizeUsd     - Position size in USD
- * @param entryPrice  - Current market price
+ * Find the single position whose ID starts with `prefix`.
+ * An exact ID match always wins, so a full ID is never ambiguous.
  */
-export async function openPosition(
+export function resolvePositionId(positions: Position[], prefix: string): ResolveResult {
+  const needle = prefix.trim();
+  if (!needle) return { ok: false, error: 'Position ID prefix must not be empty.' };
+
+  const exact = positions.find((p) => p.id === needle);
+  if (exact) return { ok: true, position: exact };
+
+  const matches = positions.filter((p) => p.id.startsWith(needle));
+  if (matches.length === 1) return { ok: true, position: matches[0] };
+  if (matches.length === 0) {
+    return { ok: false, error: `No open position matches "${needle}".` };
+  }
+  const ids = matches.map((p) => p.id).join(', ');
+  return {
+    ok: false,
+    error: `"${needle}" is ambiguous: it matches ${matches.length} positions (${ids}). Use a longer prefix.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// PnL
+// ---------------------------------------------------------------------------
+
+/**
+ * Paper PnL at `markPrice`.
+ *
+ *   price PnL   = direction × baseAmount × (markPrice − entryPrice)
+ *                 (direction = +1 long, −1 short)
+ *   est funding = sizeUsd × enteredApr × hoursHeld / 8760
+ *
+ * The funding term assumes the entry rate held for the whole period, which
+ * is only an estimate: real funding changes every interval and can flip sign.
+ */
+export function computePnl(position: Position, markPrice: number, now: Date = new Date()): PnlBreakdown {
+  const direction = position.side === 'long' ? 1 : -1;
+  const pricePnl = direction * position.baseAmount * (markPrice - position.entryPrice);
+  const hoursHeld = Math.max(0, (now.getTime() - Date.parse(position.enteredAt)) / 3_600_000);
+  const estFundingPnl = position.sizeUsd * position.enteredApr * (hoursHeld / HOURS_PER_YEAR);
+  return {
+    markPrice,
+    pricePnl,
+    estFundingPnl,
+    totalPnl: pricePnl + estFundingPnl,
+    hoursHeld,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Open / close
+// ---------------------------------------------------------------------------
+
+/**
+ * Record a paper position in `opportunity` at its scanned mark price.
+ */
+export function openPaperPosition(
+  file: string,
   opportunity: FarmingOpportunity,
   sizeUsd: number,
-  entryPrice: number,
-): Promise<Position> {
-  if (config.SIMULATION_ONLY) {
-    console.log(`🧪 [SIMULATION] Opening ${opportunity.recommendedSide} position on ${opportunity.venue}`);
-    console.log(`   Market:  ${opportunity.marketSymbol}`);
-    console.log(`   Size:    $${sizeUsd.toLocaleString()}`);
-    console.log(`   APR:     ${(opportunity.annualizedApr * 100).toFixed(2)}%`);
-    console.log(`   Price:   $${entryPrice}`);
-  } else {
-    console.log(`🚀 [LIVE] Opening ${opportunity.recommendedSide} position on ${opportunity.venue}`);
-    // TODO: Implement real order execution per venue
-    console.log('   Live execution not yet implemented — falling back to simulation.');
+  now: Date = new Date(),
+): Position {
+  if (!(sizeUsd > 0)) throw new Error(`Position size must be positive, got ${sizeUsd}`);
+  if (!(opportunity.markPrice > 0)) {
+    throw new Error(`No valid mark price for ${opportunity.venue} ${opportunity.marketSymbol}`);
   }
-
-  const position: StoredPosition = {
-    id: generateId(),
+  const positions = loadPositions(file);
+  const position: Position = {
+    id: newId(positions),
     venue: opportunity.venue,
     marketSymbol: opportunity.marketSymbol,
     side: opportunity.recommendedSide,
     sizeUsd,
-    entryPrice,
+    baseAmount: sizeUsd / opportunity.markPrice,
+    entryPrice: opportunity.markPrice,
     enteredApr: opportunity.annualizedApr,
-    enteredAt: new Date().toISOString(),
+    enteredAt: now.toISOString(),
   };
-
-  const positions = loadPositions();
   positions.push(position);
-  savePositions(positions);
-
-  return storedToPosition(position);
+  savePositions(file, positions);
+  return position;
 }
 
 /**
- * Close an existing position.
- *
- * @param positionId - ID of the position to close
+ * Remove the position identified by `idPrefix` and return it with its final
+ * PnL at `exitPrice`. Throws with a clear message if the prefix matches no
+ * position or more than one.
  */
-export async function closePosition(positionId: string): Promise<Position | null> {
-  const positions = loadPositions();
-  const idx = positions.findIndex((p) => p.id === positionId);
-
-  if (idx === -1) {
-    console.error(`❌ Position not found: ${positionId}`);
-    return null;
-  }
-
-  const [removed] = positions.splice(idx, 1);
-  savePositions(positions);
-
-  const pos = storedToPosition(removed);
-
-  if (config.SIMULATION_ONLY) {
-    console.log(`🧪 [SIMULATION] Closed ${pos.side} position on ${pos.venue}/${pos.marketSymbol}`);
-    console.log(`   Entry: $${pos.entryPrice} | PnL: $${pos.unrealizedPnl?.toFixed(2) ?? 'N/A'}`);
-  } else {
-    console.log(`🚀 [LIVE] Closed ${pos.side} position on ${pos.venue}/${pos.marketSymbol}`);
-  }
-
-  return pos;
-}
-
-/**
- * Get all open positions.
- */
-export function getPositions(): Position[] {
-  return loadPositions().map(storedToPosition);
-}
-
-/**
- * Get a single position by ID.
- */
-export function getPosition(positionId: string): Position | null {
-  const positions = loadPositions();
-  const stored = positions.find((p) => p.id === positionId);
-  return stored ? storedToPosition(stored) : null;
-}
-
-/**
- * Convert a stored position to a full Position object.
- */
-function storedToPosition(stored: StoredPosition): Position {
-  return {
-    id: stored.id,
-    venue: stored.venue,
-    marketSymbol: stored.marketSymbol,
-    side: stored.side,
-    sizeUsd: stored.sizeUsd,
-    entryPrice: stored.entryPrice,
-    enteredApr: stored.enteredApr,
-    enteredAt: new Date(stored.enteredAt),
-  };
-}
-
-/**
- * Display positions in a formatted way.
- */
-export function displayPositions(): void {
-  const positions = getPositions();
-
-  if (positions.length === 0) {
-    console.log('📭 No open positions.');
-    return;
-  }
-
-  console.log(`📊 OPEN POSITIONS (${positions.length})\n`);
-  console.log('ID        Venue        Market        Side   Size      Entry Price  APR');
-  console.log('─'.repeat(80));
-
-  for (const pos of positions) {
-    const idStr = pos.id.substring(0, 8).padEnd(9, ' ');
-    const venueStr = pos.venue.padEnd(12, ' ');
-    const marketStr = pos.marketSymbol.padEnd(13, ' ');
-    const sideStr = pos.side.padEnd(6, ' ');
-    const sizeStr = `$${pos.sizeUsd.toLocaleString()}`.padEnd(10, ' ');
-    const priceStr = `$${pos.entryPrice.toFixed(4)}`.padEnd(12, ' ');
-    const aprStr = `${(pos.enteredApr * 100).toFixed(2)}%`;
-
-    console.log(`${idStr}${venueStr}${marketStr}${sideStr}${sizeStr}${priceStr}${aprStr}`);
-  }
-  console.log('');
+export function closePaperPosition(
+  file: string,
+  idPrefix: string,
+  exitPrice: number,
+  now: Date = new Date(),
+): { position: Position; pnl: PnlBreakdown } {
+  const positions = loadPositions(file);
+  const resolved = resolvePositionId(positions, idPrefix);
+  if (!resolved.ok) throw new Error(resolved.error);
+  const position = resolved.position;
+  const pnl = computePnl(position, exitPrice, now);
+  savePositions(file, positions.filter((p) => p.id !== position.id));
+  return { position, pnl };
 }

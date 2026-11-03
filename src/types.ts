@@ -3,8 +3,6 @@
  */
 export enum Venue {
   DRIFT = 'DRIFT',
-  ZETA = 'ZETA',
-  MANGO = 'MANGO',
   HYPERLIQUID = 'HYPERLIQUID',
 }
 
@@ -14,91 +12,93 @@ export enum Venue {
 export type PositionSide = 'long' | 'short';
 
 /**
- * Raw funding rate data from a specific venue.
+ * A funding-rate observation for one market, normalised across venues.
+ *
+ * Sign convention (same on every venue): a positive `rate` means longs pay
+ * shorts; a negative `rate` means shorts pay longs.
  */
 export interface FundingRate {
   /** Venue this rate came from */
   venue: Venue;
   /** Market symbol (e.g. "SOL-PERP", "BTC-PERP") */
   marketSymbol: string;
-  /** The raw funding rate as a decimal (e.g. 0.0001 = 0.01%) */
+  /** Funding rate per interval as a fraction of notional (0.0001 = 0.01%) */
   rate: number;
-  /** The interval over which this rate applies, in hours */
+  /** Length of one funding interval, in hours */
   intervalHours: number;
-  /** Timestamp when this rate was fetched */
+  /** Current mark (or oracle) price in USD */
+  markPrice: number;
+  /** Open interest in USD, if the venue reports it */
+  openInterestUsd?: number;
+  /** When the venue last updated this rate (if known) */
+  updatedAt?: Date;
+  /** When this rate was fetched */
   fetchedAt: Date;
 }
 
 /**
- * Perpetual market descriptor.
+ * Result of fetching one venue: the usable rates plus any warnings
+ * (skipped markets, stale data, etc.).
  */
-export interface PerpMarket {
-  /** Venue the market lives on */
+export interface VenueFetchResult {
   venue: Venue;
-  /** Market symbol */
-  symbol: string;
-  /** Human-readable base asset name */
-  baseAsset: string;
-  /** Current mark price */
-  markPrice: number;
-  /** Latest funding rate */
-  fundingRate: number;
-  /** Funding interval in hours */
-  fundingIntervalHours: number;
-  /** Annualized APR based on latest funding rate */
-  aprLong: number;
-  /** Annualized APR for short positions (inverse of long APR) */
-  aprShort: number;
-  /** Open interest (if available) */
-  openInterest?: number;
-  /** 24h volume (if available) */
-  volume24h?: number;
+  rates: FundingRate[];
+  warnings: string[];
 }
 
 /**
- * An active or simulated position.
- */
-export interface Position {
-  /** Unique position identifier */
-  id: string;
-  /** Venue where the position is held */
-  venue: Venue;
-  /** Market symbol */
-  marketSymbol: string;
-  /** Direction of the position */
-  side: PositionSide;
-  /** Position size in USD */
-  sizeUsd: number;
-  /** Entry price */
-  entryPrice: number;
-  /** Annualized APR when entered */
-  enteredApr: number;
-  /** Timestamp when position was entered */
-  enteredAt: Date;
-  /** Current mark price */
-  currentPrice?: number;
-  /** Unrealized PnL in USD */
-  unrealizedPnl?: number;
-}
-
-/**
- * Ranked farming opportunity combining funding rate + metadata.
+ * Ranked farming opportunity: the side of a market that receives funding.
  */
 export interface FarmingOpportunity {
-  /** Venue offering this opportunity */
   venue: Venue;
-  /** Market symbol */
   marketSymbol: string;
-  /** Which side pays you (long = collecting funding, shorts pay you) */
+  /** The side that receives funding at the current rate */
   recommendedSide: PositionSide;
-  /** Annualized APR for the recommended side */
+  /** Annualized APR earned by `recommendedSide`, as a decimal (always >= 0) */
   annualizedApr: number;
-  /** Raw funding rate */
+  /** Raw funding rate per interval (venue sign convention, see FundingRate) */
   rawRate: number;
-  /** Funding interval in hours */
   intervalHours: number;
-  /** Current mark price */
+  /** Mark price in USD at scan time */
   markPrice: number;
-  /** Confidence score (0-1) based on recency, liquidity, etc. */
-  confidence: number;
+  openInterestUsd?: number;
+}
+
+/**
+ * A paper position, as stored on disk.
+ */
+export interface Position {
+  /** Short random hex identifier */
+  id: string;
+  venue: Venue;
+  marketSymbol: string;
+  side: PositionSide;
+  /** Notional at entry, in USD */
+  sizeUsd: number;
+  /** Position size in base units (sizeUsd / entryPrice) */
+  baseAmount: number;
+  /** Mark price at entry, in USD */
+  entryPrice: number;
+  /** Annualized APR for `side` at entry, as a decimal */
+  enteredApr: number;
+  /** ISO timestamp of entry */
+  enteredAt: string;
+}
+
+/**
+ * Paper PnL breakdown for a position at a given mark price.
+ */
+export interface PnlBreakdown {
+  markPrice: number;
+  /** PnL from price movement, in USD */
+  pricePnl: number;
+  /**
+   * Estimated funding collected, in USD, assuming the entry APR held for the
+   * whole holding period. Real funding varies every interval.
+   */
+  estFundingPnl: number;
+  /** pricePnl + estFundingPnl */
+  totalPnl: number;
+  /** Holding period, in hours */
+  hoursHeld: number;
 }

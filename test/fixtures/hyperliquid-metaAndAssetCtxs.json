@@ -1,0 +1,92 @@
+[
+  {
+    "universe": [
+      {
+        "szDecimals": 5,
+        "name": "BTC",
+        "maxLeverage": 40,
+        "marginTableId": 56
+      },
+      {
+        "szDecimals": 4,
+        "name": "ETH",
+        "maxLeverage": 25,
+        "marginTableId": 55
+      },
+      {
+        "szDecimals": 1,
+        "name": "MATIC",
+        "maxLeverage": 20,
+        "marginTableId": 20,
+        "isDelisted": true
+      },
+      {
+        "szDecimals": 2,
+        "name": "SOL",
+        "maxLeverage": 20,
+        "marginTableId": 54
+      }
+    ],
+    "marginTables": [],
+    "collateralToken": 0
+  },
+  [
+    {
+      "funding": "0.0000125",
+      "openInterest": "41329.6284",
+      "prevDayPx": "78424.0",
+      "dayNtlVlm": "2497601169.3699083328",
+      "premium": "-0.000064984",
+      "oraclePx": "76942.0",
+      "markPx": "76934.0",
+      "midPx": "76936.5",
+      "impactPxs": [
+        "76936.0",
+        "76937.0"
+      ],
+      "dayBaseVlm": "32238.53292"
+    },
+    {
+      "funding": "0.0000125",
+      "openInterest": "960604.1799999999",
+      "prevDayPx": "2292.7",
+      "dayNtlVlm": "977167135.6543699503",
+      "premium": "-0.0001327845",
+      "oraclePx": "2259.3",
+      "markPx": "2258.8",
+      "midPx": "2258.95",
+      "impactPxs": [
+        "2258.9",
+        "2259.0"
+      ],
+      "dayBaseVlm": "429990.8103999998"
+    },
+    {
+      "funding": "0.0",
+      "openInterest": "0.0",
+      "prevDayPx": "0.37621",
+      "dayNtlVlm": "0.0",
+      "premium": null,
+      "oraclePx": "0.3754",
+      "markPx": "0.37621",
+      "midPx": null,
+      "impactPxs": null,
+      "dayBaseVlm": "0.0"
+    },
+    {
+      "funding": "0.0000125",
+      "openInterest": "5599229.96",
+      "prevDayPx": "94.953",
+      "dayNtlVlm": "273201958.6976299286",
+      "premium": "-0.0002168962",
+      "oraclePx": "92.21",
+      "markPx": "92.186",
+      "midPx": "92.1895",
+      "impactPxs": [
+        "92.189",
+        "92.19"
+      ],
+      "dayBaseVlm": "2934655.9499999997"
+    }
+  ]
+]

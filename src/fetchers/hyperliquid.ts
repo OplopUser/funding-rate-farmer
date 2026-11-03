@@ -1,120 +1,119 @@
 /**
- * Hyperliquid funding rate fetcher.
+ * Hyperliquid funding-rate fetcher.
  *
- * Hyperliquid is a standalone L1 for perp trading. It provides a
- * public REST API at https://api.hyperliquid.xyz.
+ * Uses the public info endpoint (no API key):
  *
- * Integration approach:
- *   POST to https://api.hyperliquid.xyz/info with:
- *     {"type": "metaAndAssetCtxs"}
+ *   POST {HYPERLIQUID_API_URL}/info   {"type": "metaAndAssetCtxs"}
  *
- * Response:
+ * Response (abridged, verified against the live API):
+ *
  *   [
- *     { "universe": [{"name": "SOL", ...}, ...] },
- *     [{"funding": "0.0001", ...}, ...]
+ *     { "universe": [ { "name": "BTC", "szDecimals": 5, "maxLeverage": 40,
+ *                       "isDelisted"?: true }, ... ],
+ *       "marginTables": [...], "collateralToken": 0 },
+ *     [ { "funding": "0.0000125", "markPx": "76974.0", "oraclePx": "76982.0",
+ *         "openInterest": "41381.73868", "premium": "-0.0001", ... }, ... ]
  *   ]
  *
- * The asset contexts array (index 1) contains funding rates for each
- * market. The funding field is the 1h funding rate as a decimal.
- *
- * Hyperliquid funding is settled every 1 hour. So:
- *   APR ≈ hourly_rate × 24 × 365
+ * `universe[i]` and the context at index `i` describe the same asset.
+ * `funding` is the current hourly rate as a decimal fraction of notional
+ * (positive → longs pay shorts); funding is paid every hour.
+ * `openInterest` is in base units, so OI in USD = openInterest × markPx.
  */
 
-import { type FundingRate, Venue } from '../types.js';
-import { config } from '../config.js';
-import { annualizeFundingRate } from '../apr.js';
+import { type FundingRate, type VenueFetchResult, Venue } from '../types.js';
 
-const FUNDING_INTERVAL_HOURS = 1;
-const HYPERLIQUID_API = config.HYPERLIQUID_API_URL || 'https://api.hyperliquid.xyz';
+export const HYPERLIQUID_FUNDING_INTERVAL_HOURS = 1;
 
-/**
- * Response shape from Hyperliquid's metaAndAssetCtxs endpoint.
- */
-interface HyperliquidMetaResponse {
-  universe: Array<{
-    name: string;
-    szDecimals?: number;
-    maxLeverage?: number;
-  }>;
+interface HyperliquidUniverseEntry {
+  name: string;
+  szDecimals?: number;
+  maxLeverage?: number;
+  isDelisted?: boolean;
 }
 
 interface HyperliquidAssetCtx {
-  funding: string; // "0.000123" format
-  markPx?: string;
-  openInterest?: string;
-  volume24h?: string;
+  funding?: string | null;
+  markPx?: string | null;
+  oraclePx?: string | null;
+  openInterest?: string | null;
 }
 
+export type HyperliquidMetaAndAssetCtxs = [
+  { universe: HyperliquidUniverseEntry[] },
+  HyperliquidAssetCtx[],
+];
+
 /**
- * Fetch funding rates from Hyperliquid.
- *
- * No API key required for public endpoints.
+ * Convert a `metaAndAssetCtxs` response into normalised funding rates.
+ * Delisted markets and entries without a usable funding rate or price are
+ * skipped.
  */
-export async function fetchHyperliquidFundingRates(): Promise<FundingRate[]> {
-  const { default: axios } = await import('axios');
-
-  const resp = await axios.post(
-    `${HYPERLIQUID_API}/info`,
-    { type: 'metaAndAssetCtxs' },
-    {
-      headers: { 'Content-Type': 'application/json' },
-      timeout: 10_000,
-    },
-  );
-
-  const data = resp.data as [HyperliquidMetaResponse, HyperliquidAssetCtx[]];
-
+export function parseHyperliquidMetaAndAssetCtxs(
+  data: unknown,
+  fetchedAt: Date = new Date(),
+): VenueFetchResult {
   if (!Array.isArray(data) || data.length < 2) {
-    throw new Error('Unexpected Hyperliquid API response format');
+    throw new Error('Unexpected Hyperliquid response: expected [meta, assetCtxs]');
+  }
+  const [meta, ctxs] = data as HyperliquidMetaAndAssetCtxs;
+  if (!meta || !Array.isArray(meta.universe) || !Array.isArray(ctxs)) {
+    throw new Error('Unexpected Hyperliquid response: missing universe or asset contexts');
   }
 
-  const [meta, assetCtxs] = data;
-
-  if (!meta?.universe || !Array.isArray(assetCtxs)) {
-    throw new Error('Invalid Hyperliquid response structure');
-  }
-
-  if (meta.universe.length !== assetCtxs.length) {
-    console.warn(
-      `[Hyperliquid] Mismatch: ${meta.universe.length} markets but ${assetCtxs.length} asset contexts`,
+  const warnings: string[] = [];
+  if (meta.universe.length !== ctxs.length) {
+    warnings.push(
+      `universe has ${meta.universe.length} markets but ${ctxs.length} asset contexts`,
     );
   }
 
   const rates: FundingRate[] = [];
-
-  for (let i = 0; i < meta.universe.length; i++) {
+  let delisted = 0;
+  const n = Math.min(meta.universe.length, ctxs.length);
+  for (let i = 0; i < n; i++) {
     const market = meta.universe[i];
-    const ctx = assetCtxs[i];
-
+    const ctx = ctxs[i];
     if (!market || !ctx) continue;
-
-    const fundingStr = ctx.funding;
-    if (!fundingStr) continue;
-
-    const fundingRate = parseFloat(fundingStr);
-
-    if (isNaN(fundingRate)) {
-      console.warn(`[Hyperliquid] Invalid funding rate for ${market.name}: ${fundingStr}`);
+    if (market.isDelisted) {
+      delisted++;
       continue;
     }
 
+    const rate = Number(ctx.funding);
+    const markPrice = Number(ctx.markPx ?? ctx.oraclePx);
+    if (ctx.funding == null || !Number.isFinite(rate) || !(markPrice > 0)) continue;
+
+    const oiBase = Number(ctx.openInterest);
     rates.push({
       venue: Venue.HYPERLIQUID,
       marketSymbol: `${market.name}-PERP`,
-      rate: fundingRate,
-      intervalHours: FUNDING_INTERVAL_HOURS,
-      fetchedAt: new Date(),
+      rate,
+      intervalHours: HYPERLIQUID_FUNDING_INTERVAL_HOURS,
+      markPrice,
+      openInterestUsd: Number.isFinite(oiBase) ? oiBase * markPrice : undefined,
+      fetchedAt,
     });
   }
 
-  return rates;
+  if (delisted > 0) warnings.push(`skipped ${delisted} delisted markets`);
+  return { venue: Venue.HYPERLIQUID, rates, warnings };
 }
 
 /**
- * Annualize a Hyperliquid funding rate.
- * Hyperliquid uses 1h funding intervals.
+ * Fetch current funding rates and mark prices for every listed Hyperliquid perp.
  */
-export function hyperliquidAnnualizedApr(rate: number): number {
-  return annualizeFundingRate(rate, FUNDING_INTERVAL_HOURS);
+export async function fetchHyperliquidFundingRates(
+  apiUrl = 'https://api.hyperliquid.xyz',
+): Promise<VenueFetchResult> {
+  const resp = await fetch(`${apiUrl.replace(/\/+$/, '')}/info`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'metaAndAssetCtxs' }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!resp.ok) {
+    throw new Error(`Hyperliquid info request failed: HTTP ${resp.status}`);
+  }
+  return parseHyperliquidMetaAndAssetCtxs(await resp.json());
 }
